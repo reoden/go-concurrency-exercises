@@ -10,6 +10,7 @@ package main
 
 import (
 	"container/list"
+	"sync"
 	"testing"
 )
 
@@ -27,39 +28,90 @@ type page struct {
 	Value string
 }
 
-// KeyStoreCache is a LRU cache for string key-value pairs
-type KeyStoreCache struct {
+type shard struct {
 	cache map[string]*list.Element
 	pages list.List
-	load  func(string) string
+	mux   sync.Mutex
 }
 
-// New creates a new KeyStoreCache
-func New(load KeyStoreCacheLoader) *KeyStoreCache {
-	return &KeyStoreCache{
-		load:  load.Load,
+func newShard() *shard {
+	return &shard{
 		cache: make(map[string]*list.Element),
 	}
 }
 
+// KeyStoreCache is a LRU cache for string key-value pairs
+type KeyStoreCache struct {
+	shards []*shard
+	load   func(string) string
+}
+
+func fnv32(key string) uint32 {
+	hash := uint32(2166136261)
+	const prime32 = uint32(16777619)
+	keyLength := len(key)
+	for i := 0; i < keyLength; i++ {
+		hash *= prime32
+		hash ^= uint32(key[i])
+	}
+	return hash
+}
+
+const SHARDING_SIZE = 32
+
+// New creates a new KeyStoreCache
+func New(load KeyStoreCacheLoader) *KeyStoreCache {
+	shards := make([]*shard, 0, SHARDING_SIZE)
+	for i := 0; i < SHARDING_SIZE; i++ {
+		shards = append(shards, newShard())
+	}
+	return &KeyStoreCache{
+		load:   load.Load,
+		shards: shards,
+	}
+}
+func (k *KeyStoreCache) PageSize() int {
+	l := 0
+	for i := 0; i < SHARDING_SIZE; i++ {
+		l += k.shards[i].pages.Len()
+	}
+	return l
+}
+
+func (k *KeyStoreCache) CacheSize() int {
+	l := 0
+	for i := 0; i < SHARDING_SIZE; i++ {
+		l += len(k.shards[i].cache)
+	}
+	return l
+}
+
+func (k *KeyStoreCache) getShard(key string) *shard {
+	h := fnv32(key)
+	return k.shards[h%uint32(len(k.shards))]
+}
+
 // Get gets the key from cache, loads it from the source if needed
 func (k *KeyStoreCache) Get(key string) string {
-	if e, ok := k.cache[key]; ok {
-		k.pages.MoveToFront(e)
+	c := k.getShard(key)
+	c.mux.Lock()
+	defer c.mux.Unlock()
+	if e, ok := c.cache[key]; ok {
+		c.pages.MoveToFront(e)
 		return e.Value.(page).Value
 	}
 	// Miss - load from database and save it in cache
 	p := page{key, k.load(key)}
 	// if cache is full remove the least used item
-	if len(k.cache) >= CacheSize {
-		end := k.pages.Back()
+	if len(c.cache) >= CacheSize {
+		end := c.pages.Back()
 		// remove from map
-		delete(k.cache, end.Value.(page).Key)
+		delete(c.cache, end.Value.(page).Key)
 		// remove from list
-		k.pages.Remove(end)
+		c.pages.Remove(end)
 	}
-	k.pages.PushFront(p)
-	k.cache[key] = k.pages.Front()
+	c.pages.PushFront(p)
+	c.cache[key] = c.pages.Front()
 	return p.Value
 }
 

@@ -15,8 +15,8 @@ import (
 func TestMain(t *testing.T) {
 	cache, db := run(t)
 
-	cacheLen := len(cache.cache)
-	pagesLen := cache.pages.Len()
+	cacheLen := cache.CacheSize()
+	pagesLen := cache.PageSize()
 	if cacheLen != CacheSize {
 		t.Errorf("Incorrect cache size %v", cacheLen)
 	}
@@ -39,7 +39,7 @@ func TestLRU(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			value := cache.Get("Test" + strconv.Itoa(i))
-			if value != "Test" + strconv.Itoa(i) {
+			if value != "Test"+strconv.Itoa(i) {
 				t.Errorf("Incorrect db response %v", value)
 			}
 			wg.Done()
@@ -47,13 +47,14 @@ func TestLRU(t *testing.T) {
 	}
 	wg.Wait()
 
-	if len(cache.cache) != 100 {
-		t.Errorf("cache not 100: %d", len(cache.cache))
+	if cache.CacheSize() != 100 {
+		t.Errorf("cache not 100: %d", cache.CacheSize())
 	}
 	cache.Get("Test0")
 	cache.Get("Test101")
-	if _, ok := cache.cache["Test0"]; !ok {
-		t.Errorf("0 evicted incorrectly: %v", cache.cache)
+	c := cache.getShard("Test0")
+	if _, ok := c.cache["Test0"]; !ok {
+		t.Errorf("0 evicted incorrectly: %v", c.cache)
 	}
 
 }
